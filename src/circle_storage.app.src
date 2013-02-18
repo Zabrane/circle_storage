@@ -1,0 +1,12 @@
+{application, circle_storage,
+ [
+  {description, ""},
+  {vsn, "1.2.2"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {env, []},
+  {modules, [circle_storage]}
+ ]}.
