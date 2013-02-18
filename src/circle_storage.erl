@@ -5,7 +5,7 @@
 %%% Description :
 %%% --
 %%% Created : <2012-12-20>
-%%% Updated: Time-stamp: <2013-02-18 11:45:22>
+%%% Updated: Time-stamp: <2013-02-18 16:18:21>
 %%%-------------------------------------------------------------------
 -module(circle_storage).
 -behaviour(gen_server).
@@ -15,7 +15,7 @@
 -define(PARALLEL_COUNT, 4).
 -define(POS_NOT_FOUND, -1).
 -record(state, {fd, dets, pos_start, pos_end, max_cell_counts, leveldb_ref, index=[]}).
--record(record, {time, error_group, error_type, server, client, node, url}).
+%% -record(record, {time, error_group, error_type, server, client, node, url}).
 
 -include("records.hrl").
 
@@ -117,8 +117,8 @@ update_info(update_pos, {Pos_start, Pos_end, Max_cell_counts}) ->
                   ((Pos_end+1) rem Max_cell_counts)}};
         _ -> {ok, {Pos_start, ((Pos_end+1) rem Max_cell_counts)}}
     end;
-update_info(append_record, {Fd, Pos, Record}) ->
-    Bin = term_to_binary(Record),
+update_info(append_record, {Fd, Pos, Record_meta}) ->
+    Bin = term_to_binary(Record_meta),
     %% erlang:display({?LINE, Bin}),
 
     Len = erlang:byte_size(Bin),
@@ -135,9 +135,9 @@ update_info(save_leveldb_data, {Ref, Pos, Data}) ->
 %% sample format
 %% dets:lookup("data/circle_storage.db.idx", {link_head, 7, <<"errors-4xx">>}).
 %% dets:lookup("data/circle_storage.db.idx", {link_next, 7, Pos}).
-update_info(update_index, {Log_item, Dets, Pos_current, Index_keys}) ->
+update_info(update_index, {Record_meta, Dets, Pos_current, Index_keys}) ->
     lists:foreach(fun(Index) ->
-                          Value = element(Index, Log_item),
+                          Value = element(Index, Record_meta),
                           case get_value_from_dets({link_head, Index, Value}, Dets) of
                               {notfound, _} ->
                                   dets:insert(Dets, {{link_next, Index, Pos_current}, ?POS_NOT_FOUND});
@@ -147,19 +147,18 @@ update_info(update_index, {Log_item, Dets, Pos_current, Index_keys}) ->
                           dets:insert(Dets, {{link_head, Index, Value}, Pos_current})
                   end, Index_keys).
 
-write_data(Log_item, S) when is_record(Log_item, log_item)->
+write_data({Record_meta, Record_bin}, S)->
     %% error_logger:info_msg("[~p:~p] write_data~n",[?MODULE, ?LINE]),
-    Record = logitem_to_record(Log_item),
+    %% store meta data to circle file, and data to leveldb
+    ok = update_info(append_record, {S#state.fd, S#state.pos_end*?RECORD_FIXED_SIZE, Record_meta}),
 
-    ok = update_info(append_record, {S#state.fd, S#state.pos_end*?RECORD_FIXED_SIZE, Record}),
-
-    ok = update_info(save_leveldb_data, {S#state.leveldb_ref, S#state.pos_end, Log_item#log_item.data}),
+    ok = update_info(save_leveldb_data, {S#state.leveldb_ref, S#state.pos_end, Record_bin}),
     %% update position of the circle
     {ok,{New_pos_start, New_pos_end}} =
         update_info(update_pos, {S#state.pos_start, S#state.pos_end, S#state.max_cell_counts}),
 
     %% update index
-    update_info(update_index, {Log_item, S#state.dets, S#state.pos_end, S#state.index}),
+    update_info(update_index, {Record_meta, S#state.dets, S#state.pos_end, S#state.index}),
 
     S#state{pos_start=New_pos_start, pos_end=New_pos_end}.
 
@@ -168,7 +167,7 @@ find({Pos, Limit, Index, Filters}, L, S) ->
     %% disk prefetch is normally 256K, thus we set the prefetch count as 500
     find({Pos, Limit, Index, Filters}, L, S, 500).
 
-find({Pos, 0, Index, Filters}, L, S, Read_count) ->
+find({_Pos, 0, _Index, _Filters}, L, _S, _Read_count) ->
     L;
 find({Pos, Limit, Index, Filters}, L, S, Read_count) ->
     Count = circle_record_count(Pos, S#state.pos_start, S#state.pos_end, S#state.max_cell_counts),
@@ -231,9 +230,10 @@ list({Start, Limit}, Options) when is_integer(Limit)->
     %% error_logger:info_msg("[~p:~p] zip_list:~p~n",[?MODULE, ?LINE, Zip_list]),
 
     %% fill data from leveldb
-    L = lists:foldl(fun({Pos, Logitem}, List_t) ->
+    L = lists:foldl(fun({Pos, Record}, List_t) ->
+                            {Record_meta, _} = Record,
                             case eleveldb:get(S#state.leveldb_ref, term_to_binary(Pos), []) of
-                                {ok, Value} -> Value, [Logitem#log_item{data = Value} | List_t];
+                                {ok, Value} -> Value, [{Record_meta,Value} | List_t];
                                 not_found -> error_logger:error_msg("[~p:~p] Pos:~p, not_found~n",[?MODULE, ?LINE, Pos]),
                                              List_t;
                                 {error, Reason} ->
@@ -254,11 +254,11 @@ read_records(Pos, Count, {}) ->
     {ok, Read_count, Bin} = circle_file_read(S, Pos, Count),
     error_logger:info_msg("[~p:~p] after read, Pos:~p, Count:~p~n",[?MODULE, ?LINE, Pos, Count]),
     Max_cell_counts = S#state.max_cell_counts,
-    Logitem_list = binary_to_logitems(Bin, []),
-    Item_count = length(Logitem_list),
+    Record_list = binary_to_records(Bin, []),
+    Item_count = length(Record_list),
     Pos_list =
         [add_step(Pos, Offset, S) || Offset <- lists:seq(0, Item_count-1, 1)],
-    lists:zip(Pos_list, lists:reverse(Logitem_list));
+    lists:zip(Pos_list, lists:reverse(Record_list));
 read_records(Pos, Count, {Index, Index_value}) ->
     S = state(),
     Fd = S#state.fd,
@@ -279,8 +279,8 @@ read_records(Pos, Count, {Index, Index_value}) ->
             Record_list =
                 lists:map(fun(Position) ->
                                   {ok, Bin} = file:pread(Fd, Position*?RECORD_FIXED_SIZE, ?RECORD_FIXED_SIZE),
-                                  [Logitem] = binary_to_logitems(Bin, []),
-                                  Logitem
+                                  [Record] = binary_to_records(Bin, []),
+                                  Record
                           end, Pos_list),
             lists:zip(Pos_list, Record_list)
     end.
@@ -291,7 +291,7 @@ add_step(Pos, Offset, S) ->
     Pos_start = S#state.pos_start,
     Pos_end = S#state.pos_end,
     Pos2 = (Pos+Offset+Max_cell_counts) rem Max_cell_counts,
-    case is_in_circle(Pos2, Pos_start, Pos_end) of
+    case circle_storage_util:is_in_circle(Pos2, Pos_start, Pos_end) of
         true -> Pos2;
         _ ->
             error_logger:warning_msg("[~p:~p] add_step return -1, Pos:~p, Offset:~p~n",[?MODULE, ?LINE, Pos, Offset]),
@@ -299,7 +299,7 @@ add_step(Pos, Offset, S) ->
             -1
     end.
 
-circle_file_read(S, Pos, 0) ->
+circle_file_read(_S, _Pos, 0) ->
     {ok, 0, <<>>};
 circle_file_read(S, Pos, Read_count) ->
     %% error_logger:info_msg("[~p:~p] circle_file_read, Pos:~p, Read_count:~p~n",[?MODULE, ?LINE, Pos, Read_count]),
@@ -318,7 +318,7 @@ circle_file_read(S, Pos, Read_count) ->
 
 %%% ###############################################
 circle_record_count(Pos, Pos_start, Pos_end, Max_cell_counts) ->
-    case is_in_circle(Pos, Pos_start, Pos_end, Max_cell_counts) of
+    case circle_storage_util:is_in_circle(Pos, Pos_start, Pos_end, Max_cell_counts) of
         false -> 0;
         true ->
             (Pos - Pos_start - 1 + Max_cell_counts) rem Max_cell_counts
@@ -330,20 +330,19 @@ get_max_cell_counts() ->
         _ -> error(fail_to_get_max_cell_counts)
     end.
 
-%% decode binary to logitem, notes data is retrieved from leveldb
-binary_to_logitems(<<>>, L) ->
+%% decode binary to records, notes data is retrieved from leveldb
+binary_to_records(<<>>, L) ->
     lists:reverse(L);
-binary_to_logitems(Bin, L) ->
+binary_to_records(Bin, L) ->
     <<Record_data:?RECORD_FIXED_SIZE/binary, Res/binary>> = Bin,
-    Record_bin = decode_record(Record_data),
-    case Record_bin of
+    Record_meta = decode_record(Record_data),
+    case Record_meta of
         <<>> ->
             error_logger:error_msg("[~p:~p] data is empty~n",[?MODULE, ?LINE]),
-            binary_to_logitems(Res, L);
+            binary_to_records(Res, L);
         _ ->
-            Record = binary_to_term(Record_bin),
-            Log_item = record_to_logitem(Record),
-            binary_to_logitems(Res, [Log_item | L])
+            Record = {binary_to_term(Record_meta), stumb_bin},
+            binary_to_records(Res, [Record | L])
     end.
 
 match_filter(F, {_, Term}=V) when is_function(F)->
@@ -364,28 +363,10 @@ get_value_from_dets(Key, Dets) ->
         Any -> {notfound, Any}
     end.
 
-record_to_logitem(Record) when is_record(Record, record) ->
-    #log_item{time = Record#record.time,
-              error_group = list_to_binary(Record#record.error_group),
-              error_type = list_to_binary(Record#record.error_type),
-              server = list_to_binary(Record#record.server),
-              client = list_to_binary(Record#record.client),
-              node = list_to_binary(Record#record.node),
-              url = list_to_binary(Record#record.url)}.
-
-logitem_to_record(Log_item) when is_record(Log_item, log_item) ->
-    #record{time = Log_item#log_item.time,
-            error_group = binary_to_list(Log_item#log_item.error_group),
-            error_type = binary_to_list(Log_item#log_item.error_type),
-            server = binary_to_list(Log_item#log_item.server),
-            client = binary_to_list(Log_item#log_item.client),
-            node = binary_to_list(Log_item#log_item.node),
-            url = binary_to_list(Log_item#log_item.url)}.
-
 decode_record(<<Len:16/integer, Data:Len/binary, _/binary>>) ->
     Data.
 
-get_link_items(Link_start, Dets, Index, 0, L) ->
+get_link_items(_Link_start, _Dets, _Index, 0, L) ->
     L;
 get_link_items(Link_start, Dets, Index, Count, L) when Count>0 ->
     case get_value_from_dets({link_next, Index, Link_start}, Dets) of
@@ -409,5 +390,4 @@ is_in_circle(_Pos, Pos_start, Pos_end, _Max_cell_counts)
     false;
 is_in_circle(Pos, Pos_start, Pos_end, _Max_cell_counts) ->
     ((Pos > Pos_start) or (Pos < Pos_end)).
-
 %%% File : circle_storage.erl ends
