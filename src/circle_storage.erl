@@ -5,7 +5,7 @@
 %%% Description :
 %%% --
 %%% Created : <2012-12-20>
-%%% Updated: Time-stamp: <2013-02-18 16:18:21>
+%%% Updated: Time-stamp: <2013-02-18 17:07:46>
 %%%-------------------------------------------------------------------
 -module(circle_storage).
 -behaviour(gen_server).
@@ -183,7 +183,7 @@ find({Pos, Limit, Index, Filters}, L, S, Read_count) ->
         _ ->
             Pos_new = add_step(Pos, -Read_count_new, S),
 
-            Zip_list = read_records(Pos_new, Read_count_new, Index),
+            Zip_list = read_records(Pos_new, Limit, Index),
             %% error_logger:info_msg("[~p:~p] length(Zip_list):~p~n",[?MODULE, ?LINE, length(Zip_list)]),
             List = filter_result(Zip_list, Filters),
 
@@ -241,6 +241,7 @@ list({Start, Limit}, Options) when is_integer(Limit)->
                                     List_t
                             end
                     end, [], Zip_list),
+
     %% error_logger:info_msg("[~p:~p] L:~p~n",[?MODULE, ?LINE, L]),
     lists:map(fun(Item) ->
                       Id = term_to_binary(random:seed(erlang:now())), %% TODO
@@ -291,7 +292,7 @@ add_step(Pos, Offset, S) ->
     Pos_start = S#state.pos_start,
     Pos_end = S#state.pos_end,
     Pos2 = (Pos+Offset+Max_cell_counts) rem Max_cell_counts,
-    case circle_storage_util:is_in_circle(Pos2, Pos_start, Pos_end) of
+    case is_in_circle(Pos2, Pos_start, Pos_end) of
         true -> Pos2;
         _ ->
             error_logger:warning_msg("[~p:~p] add_step return -1, Pos:~p, Offset:~p~n",[?MODULE, ?LINE, Pos, Offset]),
@@ -318,7 +319,7 @@ circle_file_read(S, Pos, Read_count) ->
 
 %%% ###############################################
 circle_record_count(Pos, Pos_start, Pos_end, Max_cell_counts) ->
-    case circle_storage_util:is_in_circle(Pos, Pos_start, Pos_end, Max_cell_counts) of
+    case is_in_circle(Pos, Pos_start, Pos_end, Max_cell_counts) of
         false -> 0;
         true ->
             (Pos - Pos_start - 1 + Max_cell_counts) rem Max_cell_counts
@@ -390,4 +391,5 @@ is_in_circle(_Pos, Pos_start, Pos_end, _Max_cell_counts)
     false;
 is_in_circle(Pos, Pos_start, Pos_end, _Max_cell_counts) ->
     ((Pos > Pos_start) or (Pos < Pos_end)).
+
 %%% File : circle_storage.erl ends

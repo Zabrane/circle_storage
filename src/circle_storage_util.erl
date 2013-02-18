@@ -22,6 +22,4 @@ wait_result(Pid, Ref, Timeout) ->
             exit(time_out)
     end.
 
-
-
 %%% File : circle_storage_util.erl ends
