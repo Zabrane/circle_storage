@@ -5,7 +5,7 @@
 %%% Description :
 %%% --
 %%% Created : <2012-12-20>
-%%% Updated: Time-stamp: <2013-02-25 15:07:00>
+%%% Updated: Time-stamp: <2013-02-25 15:49:13>
 %%%-------------------------------------------------------------------
 -module(circle_storage).
 -behaviour(gen_server).
@@ -15,6 +15,8 @@
 -define(PARALLEL_COUNT, 4).
 -define(POS_NOT_FOUND, -1).
 -record(state, {fd, dets, pos_start, pos_end, max_cell_counts, leveldb_ref, index=[]}).
+
+-record(stable_conf, {circle_fd, leveldb_ref, dets_name, max_cell_counts}).
 %% -record(record, {time, error_group, error_type, server, client, node, url}).
 
 -include("records.hrl").
@@ -96,7 +98,13 @@ open(File, Options)->
     {ok, Leveldb_ref} = eleveldb:open(File++".leveldb",
                                       [{create_if_missing, true}, {cache_size, 83886080}]),
     Max_cell_counts = proplists:get_value(max_cell_counts, Options, 10*1024*1024),
-    ets:insert(circle_storage,{max_cell_counts, Max_cell_counts}),
+    ets:insert(circle_storage,{stable_conf,
+                               #stable_conf{circle_fd=Fd,
+                                                     leveldb_ref=Leveldb_ref,
+                                                     dets_name=Dets,
+                                                     max_cell_counts=Max_cell_counts
+                                                    }}),
+
     Index = proplists:get_value(index, Options, []),
     case get_value_from_dets(pos_start_end, Dets) of
         {ok, {Pos_start, Pos_end}} ->
@@ -172,8 +180,8 @@ find({Pos, Limit, Index, Filters}, L, S) ->
 
 find({_Pos, 0, _Index, _Filters}, L, _S, _Read_count) ->
     L;
-find({Pos, Limit, Index, Filters}, L, S, Read_count) ->
-    Count = circle_record_count(Pos, S#state.pos_start, S#state.pos_end, S#state.max_cell_counts),
+find({Pos, Limit, Index, Filters}, L, {Pos_start, Pos_end, Stable_conf} = S, Read_count) ->
+    Count = circle_record_count(Pos, Pos_start, Pos_end, Stable_conf#stable_conf.max_cell_counts),
     error_logger:info_msg("[~p:~p] find. Pos:~p, Limit:~p, Read_count:~p, Count:~p~n", [?MODULE, ?LINE, Pos, Limit, Read_count, Count]),
     Read_count_new =
         case Count > Read_count of
@@ -186,7 +194,7 @@ find({Pos, Limit, Index, Filters}, L, S, Read_count) ->
         _ ->
             Pos_new = add_step(Pos, -Read_count_new, S),
 
-            Zip_list = read_records(Pos_new, Limit, Index),
+            Zip_list = read_records(Pos_new, Limit, Index, S),
             %% error_logger:info_msg("[~p:~p] length(Zip_list):~p~n",[?MODULE, ?LINE, length(Zip_list)]),
             List = filter_result(Zip_list, Filters),
 
@@ -217,25 +225,30 @@ filter_result(Zip_list, Filters) ->
     List.
 
 list({0, Limit}, Options) when is_integer(Limit)->
-    S = state(),
-    Start = (S#state.pos_end -1 + S#state.max_cell_counts) rem S#state.max_cell_counts,
+    [{stable_conf, Stable_conf} | _ ] = ets:lookup(circle_storage, stable_conf),
+    Max_cell_counts = Stable_conf#stable_conf.max_cell_counts,
+    [{pos_start_end, {_Pos_start, Pos_end}} | _ ] = dets:lookup(Stable_conf#stable_conf.dets_name, pos_start_end),
+    Start = (Pos_end -1 + Max_cell_counts) rem Max_cell_counts,
     list({Start, Limit}, Options);
 list({Start, Limit}, Options) when is_integer(Limit)->
-    S = state(),
+    [{stable_conf, Stable_conf} | _ ] = ets:lookup(circle_storage, stable_conf),
+    Max_cell_counts = Stable_conf#stable_conf.max_cell_counts,
+    [{pos_start_end, {Pos_start, Pos_end}} | _ ] = dets:lookup(Stable_conf#stable_conf.dets_name, pos_start_end),
+
     error_logger:info_msg("[~p:~p] Start:~p, Limit:~p, Options:~p, pos_end:~p~n",
-                          [?MODULE, ?LINE, Start, Limit, Options, S#state.pos_end]),
+                          [?MODULE, ?LINE, Start, Limit, Options, Pos_end]),
 
     Index = proplists:get_value(index, Options, {}),
     Filters = proplists:get_value(filters, Options, []),
 
-    Zip_list = find({Start, Limit, Index, Filters}, [], S),
+    Zip_list = find({Start, Limit, Index, Filters}, [], {Pos_start, Pos_end, Stable_conf}),
 
     %% error_logger:info_msg("[~p:~p] zip_list:~p~n",[?MODULE, ?LINE, Zip_list]),
 
     %% fill data from leveldb
     L = lists:foldl(fun({Pos, Record}, List_t) ->
                             {Record_meta, _} = Record,
-                            case eleveldb:get(S#state.leveldb_ref, term_to_binary(Pos), []) of
+                            case eleveldb:get(Stable_conf#stable_conf.leveldb_ref, term_to_binary(Pos), []) of
                                 {ok, Value} -> Value, [{Record_meta,Value} | List_t];
                                 not_found -> error_logger:error_msg("[~p:~p] Pos:~p, not_found~n",[?MODULE, ?LINE, Pos]),
                                              List_t;
@@ -253,20 +266,17 @@ list({Start, Limit}, Options) when is_integer(Limit)->
 
 %% dets:lookup("data/circle_storage.db.idx", {link_head, 7, <<"errors-4xx">>}).
 %% dets:lookup("data/circle_storage.db.idx", {link_next, 7, Pos}).
-read_records(Pos, Count, {}) ->
-    S = state(),
+read_records(Pos, Count, {}, S) ->
     {ok, Read_count, Bin} = circle_file_read(S, Pos, Count),
     error_logger:info_msg("[~p:~p] after read, Pos:~p, Count:~p~n",[?MODULE, ?LINE, Pos, Count]),
-    Max_cell_counts = S#state.max_cell_counts,
     Record_list = binary_to_records(Bin, []),
     Item_count = length(Record_list),
     Pos_list =
         [add_step(Pos, Offset, S) || Offset <- lists:seq(0, Item_count-1, 1)],
     lists:zip(Pos_list, lists:reverse(Record_list));
-read_records(Pos, Count, {Index, Index_value}) ->
-    S = state(),
-    Fd = S#state.fd,
-    Dets=S#state.dets,
+read_records(Pos, Count, {Index, Index_value}, {Pos_start, Pos_end, Stable_conf} = S) ->
+    Fd=S#stable_conf.circle_fd,
+    Dets=S#stable_conf.dets_name,
 
     %% get link head for current index search
     case get_value_from_dets({link_head, Index, Index_value}, Dets) of
@@ -289,11 +299,9 @@ read_records(Pos, Count, {Index, Index_value}) ->
             lists:zip(Pos_list, Record_list)
     end.
 
-add_step(Pos, Offset, S) ->
+add_step(Pos, Offset, {Pos_start, Pos_end, Stable_conf}) ->
     %% error_logger:info_msg("[~p:~p] add_step, Pos:~p, Offset:~p~n",[?MODULE, ?LINE, Pos, Offset]),
-    Max_cell_counts = S#state.max_cell_counts,
-    Pos_start = S#state.pos_start,
-    Pos_end = S#state.pos_end,
+    Max_cell_counts = Stable_conf#stable_conf.max_cell_counts,
     Pos2 = (Pos+Offset+Max_cell_counts) rem Max_cell_counts,
     case is_in_circle(Pos2, Pos_start, Pos_end) of
         true -> Pos2;
@@ -305,18 +313,19 @@ add_step(Pos, Offset, S) ->
 
 circle_file_read(_S, _Pos, 0) ->
     {ok, 0, <<>>};
-circle_file_read(S, Pos, Read_count) ->
+circle_file_read({Pos_start, Pos_end, Stable_conf} = S, Pos, Read_count) ->
     %% error_logger:info_msg("[~p:~p] circle_file_read, Pos:~p, Read_count:~p~n",[?MODULE, ?LINE, Pos, Read_count]),
-    Fd = S#state.fd,
-    case S#state.pos_end > Pos of
+    Fd=Stable_conf#stable_conf.circle_fd,
+    Max_cell_counts = Stable_conf#stable_conf.max_cell_counts,
+    case Pos_end > Pos of
         true ->
             {ok, Bin} = file:pread(Fd, Pos*?RECORD_FIXED_SIZE, Read_count*?RECORD_FIXED_SIZE),
             {ok, Read_count, Bin};
         false ->
             {ok, Bin1} = file:pread(Fd, Pos*?RECORD_FIXED_SIZE,
-                                    (S#state.max_cell_counts - Pos + 1)*?RECORD_FIXED_SIZE),
+                                    (Max_cell_counts - Pos + 1)*?RECORD_FIXED_SIZE),
             {ok, Bin2} = file:pread(Fd, 0,
-                                    (Read_count - S#state.max_cell_counts + Pos - 1)*?RECORD_FIXED_SIZE),
+                                    (Read_count - Max_cell_counts + Pos - 1)*?RECORD_FIXED_SIZE),
             {ok, Read_count, <<Bin1/binary, Bin2/binary>>}
     end.
 
@@ -326,12 +335,6 @@ circle_record_count(Pos, Pos_start, Pos_end, Max_cell_counts) ->
         false -> 0;
         true ->
             (Pos - Pos_start - 1 + Max_cell_counts) rem Max_cell_counts
-    end.
-
-get_max_cell_counts() ->
-    case ets:lookup(circle_storage, max_cell_counts) of
-        [{max_cell_counts, Max_cell_counts}] -> Max_cell_counts;
-        _ -> error(fail_to_get_max_cell_counts)
     end.
 
 %% decode binary to records, notes data is retrieved from leveldb
@@ -380,7 +383,8 @@ get_link_items(Link_start, Dets, Index, Count, L) when Count>0 ->
     end.
 
 is_in_circle(Pos, Pos_start, Pos_end) ->
-    Max_cell_counts = get_max_cell_counts(),
+    [{stable_conf, Stable_conf} | _ ] = ets:lookup(circle_storage, stable_conf),
+    Max_cell_counts = Stable_conf#stable_conf.max_cell_counts,
     is_in_circle(Pos, Pos_start, Pos_end, Max_cell_counts).
 
 is_in_circle(Pos, _Pos_start, _Pos_end, Max_cell_counts)
