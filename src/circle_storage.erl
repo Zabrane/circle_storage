@@ -5,7 +5,7 @@
 %%% Description :
 %%% --
 %%% Created : <2012-12-20>
-%%% Updated: Time-stamp: <2013-02-25 16:52:50>
+%%% Updated: Time-stamp: <2013-02-25 17:33:58>
 %%%-------------------------------------------------------------------
 -module(circle_storage).
 -behaviour(gen_server).
@@ -215,14 +215,11 @@ filter_result(Zip_list, Filters) ->
 
     %% error_logger:info_msg("[~p:~p] Result_list:~p~n",[?MODULE, ?LINE, Result_list]),
     %% remove the mismatched items
-    List = lists:reverse(
-             lists:foldl(fun({K, Item}, List_t) ->
-                                 case K of
-                                     true -> [Item | List_t];
-                                     false -> List_t
-                                 end
-                         end, [], Result_list)),
-    List.
+    L = lists:filter(fun({K, Item}) ->
+                             K
+                     end, Result_list),
+    %% error_logger:info_msg("[~p:~p] here:~p~n",[?MODULE, ?LINE, L]),
+    [Item || {K, Item} <- L].
 
 list({0, Limit}, Options) when is_integer(Limit)->
     [{stable_conf, Stable_conf} | _ ] = ets:lookup(circle_storage, stable_conf),
@@ -245,23 +242,20 @@ list({Start, Limit}, Options) when is_integer(Limit)->
     %% error_logger:info_msg("[~p:~p] zip_list:~p~n",[?MODULE, ?LINE, Zip_list]),
 
     %% fill data from leveldb
-    L = lists:foldl(fun({Pos, Record}, List_t) ->
-                            {Record_meta, _} = Record,
-                            case eleveldb:get(Stable_conf#stable_conf.leveldb_ref, term_to_binary(Pos), []) of
-                                {ok, Value} -> Value, [{Record_meta,Value} | List_t];
-                                not_found -> error_logger:error_msg("[~p:~p] Pos:~p, not_found~n",[?MODULE, ?LINE, Pos]),
-                                             List_t;
-                                {error, Reason} ->
-                                    error_logger:error_msg("[~p:~p] error:~p~n",[?MODULE, ?LINE, Reason]),
-                                    List_t
-                            end
-                    end, [], Zip_list),
-
-    %% error_logger:info_msg("[~p:~p] L:~p~n",[?MODULE, ?LINE, L]),
-    lists:map(fun(Item) ->
-                      Id = term_to_binary(random:seed(erlang:now())), %% TODO
-                      {Id, Item}
-              end, lists:reverse(L)).
+    L = lists:map(fun({Pos, Record}) ->
+                          {Record_meta, _} = Record,
+                          Item = case eleveldb:get(Stable_conf#stable_conf.leveldb_ref, term_to_binary(Pos), []) of
+                              {ok, Value} -> Value, {Record_meta,Value};
+                              not_found -> error_logger:error_msg("[~p:~p] Pos:~p, not_found~n",[?MODULE, ?LINE, Pos]),
+                                           error(fail_to_get_pos);
+                              {error, Reason} ->
+                                         error_logger:error_msg("[~p:~p] error:~p~n",[?MODULE, ?LINE, Reason]),
+                                         error(get_leveldb_fail)
+                          end,
+                          Id = term_to_binary(random:seed(erlang:now())), %% TODO
+                          {Id, Item}
+              end, Zip_list),
+    L.
 
 %% dets:lookup("data/circle_storage.db.idx", {link_head, 7, <<"errors-4xx">>}).
 %% dets:lookup("data/circle_storage.db.idx", {link_next, 7, Pos}).
