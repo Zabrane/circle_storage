@@ -5,7 +5,7 @@
 %%% Description :
 %%% --
 %%% Created : <2012-12-20>
-%%% Updated: Time-stamp: <2013-02-18 17:07:46>
+%%% Updated: Time-stamp: <2013-02-25 15:07:00>
 %%%-------------------------------------------------------------------
 -module(circle_storage).
 -behaviour(gen_server).
@@ -72,7 +72,9 @@ handle_cast(_Msg, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, _State) ->
+terminate(_Reason, State) ->
+    Dets = State#state.dets,
+    ok = dets:sync(Dets),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -156,6 +158,7 @@ write_data({Record_meta, Record_bin}, S)->
     %% update position of the circle
     {ok,{New_pos_start, New_pos_end}} =
         update_info(update_pos, {S#state.pos_start, S#state.pos_end, S#state.max_cell_counts}),
+    ok = dets:insert(S#state.dets, {pos_start_end, {New_pos_start, New_pos_end}}),
 
     %% update index
     update_info(update_index, {Record_meta, S#state.dets, S#state.pos_end, S#state.index}),
