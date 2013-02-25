@@ -5,7 +5,7 @@
 %%% Description :
 %%% --
 %%% Created : <2012-12-20>
-%%% Updated: Time-stamp: <2013-02-25 17:33:58>
+%%% Updated: Time-stamp: <2013-02-25 18:28:42>
 %%%-------------------------------------------------------------------
 -module(circle_storage).
 -behaviour(gen_server).
@@ -182,28 +182,29 @@ find({_Pos, 0, _Index, _Filters}, L, _S, _Read_count) ->
     L;
 find({Pos, Limit, Index, Filters}, L, {Pos_start, Pos_end, Stable_conf} = S, Read_count) ->
     Count = circle_record_count(Pos, Pos_start, Pos_end, Stable_conf#stable_conf.max_cell_counts),
-    error_logger:info_msg("[~p:~p] find. Pos:~p, Limit:~p, Read_count:~p, Count:~p~n", [?MODULE, ?LINE, Pos, Limit, Read_count, Count]),
-    Read_count_new =
-        case Count > Read_count of
-            true -> Read_count;
-            _ -> Count
-        end,
-
-    case Limit > Count of
-        true -> find({Pos, Count, Index, Filters}, L, S, Read_count_new);
+    case Count of
+        0 -> %% No records remain
+            find({Pos, 0, Index, Filters}, L, {Pos_start, Pos_end, Stable_conf} = S, Read_count);
         _ ->
-            Pos_new = add_step(Pos, -Read_count_new, S),
+            error_logger:info_msg("[~p:~p] find. Pos:~p, Limit:~p, Read_count:~p, Count:~p~n", [?MODULE, ?LINE, Pos, Limit, Read_count, Count]),
 
-            Zip_list = read_records(Pos_new, Limit, Index, S),
+            Read_count1 = erlang:min(Count, Read_count),
+
+            Pos_new = add_step(Pos, -Read_count1, S),
+
+            Zip_list = read_records(Pos_new, Read_count1, Index, S),
             %% error_logger:info_msg("[~p:~p] length(Zip_list):~p~n",[?MODULE, ?LINE, length(Zip_list)]),
-            List = filter_result(Zip_list, Filters),
+            List = lists:reverse(filter_result(Zip_list, Filters)),
 
             %% error_logger:info_msg("[~p:~p] List:~p~n",[?MODULE, ?LINE, List]),
             Result_count = length(List),
             case Limit > Result_count of
-                %% TODO
-                true -> find({Pos_new, Limit - Result_count, Index, Filters}, List++L, S, Read_count_new);
-                _ -> List
+                true ->
+                    find({Pos_new, Limit - Result_count, Index, Filters}, L ++ List,
+                         {Pos_start, Pos_new, Stable_conf}, Read_count);
+                _ ->
+                    {L2, _L3} = lists:split(Limit, List),
+                    L ++ L2
             end
     end.
 
