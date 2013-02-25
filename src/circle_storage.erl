@@ -5,7 +5,7 @@
 %%% Description :
 %%% --
 %%% Created : <2012-12-20>
-%%% Updated: Time-stamp: <2013-02-25 15:49:13>
+%%% Updated: Time-stamp: <2013-02-25 16:52:50>
 %%%-------------------------------------------------------------------
 -module(circle_storage).
 -behaviour(gen_server).
@@ -100,10 +100,10 @@ open(File, Options)->
     Max_cell_counts = proplists:get_value(max_cell_counts, Options, 10*1024*1024),
     ets:insert(circle_storage,{stable_conf,
                                #stable_conf{circle_fd=Fd,
-                                                     leveldb_ref=Leveldb_ref,
-                                                     dets_name=Dets,
-                                                     max_cell_counts=Max_cell_counts
-                                                    }}),
+                                            leveldb_ref=Leveldb_ref,
+                                            dets_name=Dets,
+                                            max_cell_counts=Max_cell_counts
+                                           }}),
 
     Index = proplists:get_value(index, Options, []),
     case get_value_from_dets(pos_start_end, Dets) of
@@ -232,7 +232,6 @@ list({0, Limit}, Options) when is_integer(Limit)->
     list({Start, Limit}, Options);
 list({Start, Limit}, Options) when is_integer(Limit)->
     [{stable_conf, Stable_conf} | _ ] = ets:lookup(circle_storage, stable_conf),
-    Max_cell_counts = Stable_conf#stable_conf.max_cell_counts,
     [{pos_start_end, {Pos_start, Pos_end}} | _ ] = dets:lookup(Stable_conf#stable_conf.dets_name, pos_start_end),
 
     error_logger:info_msg("[~p:~p] Start:~p, Limit:~p, Options:~p, pos_end:~p~n",
@@ -269,7 +268,7 @@ list({Start, Limit}, Options) when is_integer(Limit)->
 read_records(Pos, Count, {}, S) ->
     {ok, Read_count, Bin} = circle_file_read(S, Pos, Count),
     error_logger:info_msg("[~p:~p] after read, Pos:~p, Count:~p~n",[?MODULE, ?LINE, Pos, Count]),
-    Record_list = binary_to_records(Bin, []),
+    Record_list = binary_to_records(Bin),
     Item_count = length(Record_list),
     Pos_list =
         [add_step(Pos, Offset, S) || Offset <- lists:seq(0, Item_count-1, 1)],
@@ -293,7 +292,7 @@ read_records(Pos, Count, {Index, Index_value}, {Pos_start, Pos_end, Stable_conf}
             Record_list =
                 lists:map(fun(Position) ->
                                   {ok, Bin} = file:pread(Fd, Position*?RECORD_FIXED_SIZE, ?RECORD_FIXED_SIZE),
-                                  [Record] = binary_to_records(Bin, []),
+                                  [Record] = binary_to_records(Bin),
                                   Record
                           end, Pos_list),
             lists:zip(Pos_list, Record_list)
@@ -338,19 +337,8 @@ circle_record_count(Pos, Pos_start, Pos_end, Max_cell_counts) ->
     end.
 
 %% decode binary to records, notes data is retrieved from leveldb
-binary_to_records(<<>>, L) ->
-    lists:reverse(L);
-binary_to_records(Bin, L) ->
-    <<Record_data:?RECORD_FIXED_SIZE/binary, Res/binary>> = Bin,
-    Record_meta = decode_record(Record_data),
-    case Record_meta of
-        <<>> ->
-            error_logger:error_msg("[~p:~p] data is empty~n",[?MODULE, ?LINE]),
-            binary_to_records(Res, L);
-        _ ->
-            Record = {binary_to_term(Record_meta), stumb_bin},
-            binary_to_records(Res, [Record | L])
-    end.
+binary_to_records(Bin) ->
+    [{binary_to_term(decode_record(Record_data)), stumb_bin} || <<Record_data:?RECORD_FIXED_SIZE/binary>> <= Bin ].
 
 match_filter(F, {_, Term}=V) when is_function(F)->
     {F(Term), V};
